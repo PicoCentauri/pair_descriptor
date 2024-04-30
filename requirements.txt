@@ -1,0 +1,5 @@
+ase
+dscribe
+metatensor-operations
+torch
+rascaline@git+https://github.com/Luthaf/rascaline.git@5ac2ee9e6b45f31ba608c02d6d8dd7d82b2009a9
