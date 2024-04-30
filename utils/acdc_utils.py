@@ -6,7 +6,7 @@ import torch
 from typing import List, Optional, Union
 import metatensor
 import metatensor.operations as operations
-
+from metatensor import equal, equal_metadata, allclose, allclose_block, sort, sort_block
 
 # from ..utils.symmetry import ClebschGordanReal
 def fix_gij(rho0_ij):
@@ -54,7 +54,7 @@ def fix_gij(rho0_ij):
                 components=block.components,
                 properties=properties,
             )
-        block = metatensor.sort_block(block)  # sort block samples
+        block = sort_block(block)  # sort block samples
         blocks.append(block)
     return TensorMap(rho0_ij.keys, blocks)
 
@@ -171,6 +171,7 @@ def cg_combine(
     filter_sigma=[-1, 1],
     other_keys_match=None,
     mp=False,
+    device=None,
 ):
     """
     modified cg_combine from acdc_mini.py to add the MP contraction, that contracts over NOT the center but the neighbor yielding |rho_j> |g_ij>, can be merged
@@ -180,10 +181,10 @@ def cg_combine(
     lmax_a = max(x_a.keys["spherical_harmonics_l"])
     lmax_b = max(x_b.keys["spherical_harmonics_l"])
     if lcut is None:
-        lcut = lmax_a + lmax_b
+        lcut = lmax_a + lmax_b + 1
 
     if clebsch_gordan is None:
-        clebsch_gordan = ClebschGordanReal(lcut)
+        clebsch_gordan = ClebschGordanReal(max(lcut, lmax_a, lmax_b) + 1, device=device)
 
     other_keys_a = tuple(
         name
@@ -259,6 +260,7 @@ def cg_combine(
     X_grads = {}
 
     for index_a, block_a in x_a.items():
+        block_a = sort_block(block_a, axes="samples")
         lam_a = index_a["spherical_harmonics_l"]
         sigma_a = index_a["inversion_sigma"]
         order_a = index_a["order_nu"]
@@ -267,7 +269,7 @@ def cg_combine(
         )  # pre-extract this block as accessing a c property has a non-zero cost
         samples_a = block_a.samples
         for index_b, block_b in x_b.items():
-            # block_b = metatensor.sort_block(block_b)
+            block_b = sort_block(block_b, axes="samples")
             lam_b = index_b["spherical_harmonics_l"]
             sigma_b = index_b["inversion_sigma"]
             order_b = index_b["order_nu"]
@@ -313,10 +315,11 @@ def cg_combine(
                     )
 
             if mp:
+                # combine rho_j and g_ji (i.e. combine dentiy on neighbor j with the g_ji vector where i is the central atom)
                 if "neighbor" in samples_b.names and "neighbor" not in samples_a.names:
                     center_slice = []
                     smp_a, smp_b = 0, 0
-                    while smp_b < samples_b.shape[0]:
+                    while smp_b < samples_b.values.shape[0]:
                         # print(index_b, samples_b[smp_b][["structure", "center", "neighbor"]], index_a, samples_a[smp_a])
                         idx = [
                             idx
@@ -327,10 +330,11 @@ def cg_combine(
                         center_slice.append(idx)
                         smp_b += 1
                     center_slice = np.asarray(center_slice)
-                #                     print(index_a, index_b, center_slice,  block_a.samples, block_b.samples)
+
                 else:
                     center_slice = slice(None)
             else:
+                # combine rho_i and g_ij (i.e. combine dentiy on central atom i with the g_ji vector where i is the central atom)
                 if "neighbor" in samples_b.names and "neighbor" not in samples_a.names:
                     neighbor_slice = []
                     smp_a, smp_b = 0, 0
@@ -342,48 +346,19 @@ def cg_combine(
                             samples_a[smp_a]["structure"],
                             samples_a[smp_a]["center"],
                         ):
-                            # if np.all(
-                            #     samples_b.values[smp_b][:2] != samples_a.values[smp_a]
-                            # ):
+                     
                             if smp_a + 1 < samples_a.values.shape[0]:
                                 smp_a += 1
                         neighbor_slice.append(smp_a)
                         smp_b += 1
                     neighbor_slice = np.asarray(neighbor_slice)
-                    # print(
-                    #     index_a,
-                    #     index_b,
-                    #     #     samples_b,
-                    #     # samples_a,
-                    #     # "SA",
-                    #     # samples_b,
-                    #     # "SB",
-                    #     neighbor_slice,
-                    #     "NS",
-                    #     block_a.samples.values[neighbor_slice],
-                    #     "A samples",
-                    #     block_b.samples,
-                    #     "B samples",
-                    #     block_a.values[neighbor_slice],
-                    #     "A values",
-                    #     block_b.values[b_slice],
-                    #     "B value",
-                    # )
-
+              
                 elif "neighbor" in samples_b.names and "neighbor" in samples_a.names:
                     # taking tensor products of gij and gik
                     neighbor_slice = []
                     b_slice = []
                     samples_final = []
                     smp_a, smp_b = 0, 0
-                    """
-                    while smp_b < samples_b.shape[0]:
-                        idx= [idx for idx, tup in enumerate(samples_a) if tup[0] ==samples_b[smp_b]["structure"] and tup[1] == samples_b[smp_b]["center"]]
-                        neighbor_slice.extend(idx)
-                        b_slice.extend([smp_b]*len(idx))
-                        samples_final.extend(flatten(list(product([samples_b[smp_b]],block_a.samples.asarray()[idx][:,-1]))))
-                        smp_b+=1
-                    """
                     sc_b = (-1, -1)
                     while smp_b < samples_b.values.shape[0]:
                         # checks if structure index needs updating
@@ -418,9 +393,6 @@ def cg_combine(
                                 # smp_a_idx = Labels(["pair_id", "neighbor"], np.array(x, dtype=np.int32))
                         neighbor_slice.extend(idx)
                         b_slice.extend([smp_b] * len(idx))
-                        # samples_final.extend(flatten(list(product([samples_b[smp_b]],smp_a_idx))))
-                        # samples_final.extend(np.hstack([[tuple(samples_b[smp_b-1])]*8, smp_a_idx[:,np.newaxis] ]) )
-                        # print(smp_a_idx, samples_b[smp_b])
                         if "pair_id" in block_a.samples.names:
                             samples_final.extend(
                                 [
@@ -636,6 +608,7 @@ def cg_increment(
     filter_sigma=[-1, 1],
     other_keys_match=None,
     mp=False,
+    feature_names=None,
 ):
     """Specialized version of the CG product to perform iterations with nu=1 features"""
 
@@ -650,12 +623,14 @@ def cg_increment(
     #         + ("l_2",)
     #     )
     # else:
-    feature_names = (
-        tuple(x_nu.block(0).properties.names)
-        + ("k_" + str(nu + 1),)
-        + tuple(root + "_" + str(nu + 1) for root in feature_roots)
-        + ("l_" + str(nu + 1),)
-    )
+    feature_names = feature_names
+    if feature_names is None:
+        feature_names = (
+            tuple(x_nu.block(0).properties.names)
+            + ("k_" + str(nu + 1),)
+            + tuple(root + "_" + str(nu + 1) for root in feature_roots)
+            + ("l_" + str(nu + 1),)
+        )
     return cg_combine(
         x_nu,
         x_1,
@@ -667,23 +642,20 @@ def cg_increment(
         mp=mp,
     )
 
-
-def relabel_key_contract(tensormap):
-    """Relabel the key to contract with other_keys_match, for ACDC - 'species_center' gets renamed to 'species_contract'
-    while for N-center ACDC 'specoes_neighbor' gets renamed to 'species_contract'"""
+def relabel_keys(tensormap, key_name: str = None):
+    # TODO: support key_name to be a dictionary of {key_name: new_name}
+    """Relabel the key to contract with other_keys_match, for ACDC - 'species_center' gets renamed to 'key_name'
+    while for N-center ACDC 'species_neighbor' gets renamed to 'key_name'"""
+    if key_name is None:
+        key_name = "species_contract"
     new_tensor_blocks = []
     new_tensor_keys = []
-    for k, b in tensormap:
+    for k, b in tensormap.items():
         key = tuple(k)
-        block = TensorBlock(
-            values=b.values,
-            samples=b.samples,
-            components=b.components,
-            properties=b.properties,
-        )
+        block = b.copy()
         new_tensor_blocks.append(block)
         new_tensor_keys.append(key)
-    if "species_neighbor" in tensormap.keys.dtype.names:
+    if "species_neighbor" in tensormap.keys.names:
         # Relabel neighbor species as species_contract to be the channel to contract |rho_j> |g_ij>
         new_tensor_keys = Labels(
             (
@@ -691,9 +663,9 @@ def relabel_key_contract(tensormap):
                 "inversion_sigma",
                 "spherical_harmonics_l",
                 "species_center",
-                "species_contract",
+                key_name,
             ),
-            np.asarray(new_tensor_keys, dtype=np.int32),
+            np.asarray(new_tensor_keys),
         )
     else:
         # Relabel center species as species_contract to be the channel to contract |rho_j>
@@ -702,13 +674,14 @@ def relabel_key_contract(tensormap):
                 "order_nu",
                 "inversion_sigma",
                 "spherical_harmonics_l",
-                "species_contract",
+                key_name,
             ),
-            np.asarray(new_tensor_keys, dtype=np.int32),
+            np.asarray(new_tensor_keys),
         )
 
     new_tensormap = TensorMap(new_tensor_keys, new_tensor_blocks)
     return new_tensormap
+
 
 
 def contract_rho_ij(rhoijp, elements, property_names=None):

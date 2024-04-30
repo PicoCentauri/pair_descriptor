@@ -11,11 +11,11 @@ import numpy as np
 import warnings
 
 
-from acdc_utils import (
+from .acdc_utils import (
     acdc_standardize_keys,
     cg_increment,
     cg_combine,
-    relabel_key_contract,
+    relabel_keys,
     fix_gij,
     _pca,
 )
@@ -34,7 +34,7 @@ def single_center_features(frames, hypers, order_nu, lcut=None, cg=None, **kwarg
     if lcut is None:
         lcut = 10
     if cg is None:
-        from symmetry import ClebschGordanReal
+        from .symmetry import ClebschGordanReal
 
         L = max(lcut, hypers["max_angular"])
         cg = ClebschGordanReal(lmax=L)
@@ -68,6 +68,7 @@ def single_center_features(frames, hypers, order_nu, lcut=None, cg=None, **kwarg
 def pair_features(
     frames: List[ase.Atoms],
     hypers: dict,
+    hypers_pair: dict = None,
     cg=None,
     rhonu_i: TensorMap = None,
     order_nu: Union[List[int], int] = None,
@@ -82,14 +83,16 @@ def pair_features(
     if lcut is None:
         lcut = 10
     if cg is None:
-        from symmetry import ClebschGordanReal
+        from .symmetry import ClebschGordanReal
 
         L = max(lcut, hypers["max_angular"])
         cg = ClebschGordanReal(lmax=L)
         # cg = ClebschGordanReal(lmax=lcut)
+    if hypers_pair is None:
+        hypers_pair = hypers
+    calculator = PairExpansion(**hypers_pair)
 
-    calculator = PairExpansion(**hypers)
-    rho0_ij = calculator.compute(frames)
+    rho0_ij = calculator.compute(frames) 
 
     if all_pairs:
         hypers_allpairs = hypers.copy()
@@ -120,50 +123,80 @@ def pair_features(
 
         rho0_ij = calculator_allpairs.compute(frames)
 
-    # rho0_ij = acdc_standardize_keys(rho0_ij)
     rho0_ij = fix_gij(rho0_ij)
     rho0_ij = acdc_standardize_keys(rho0_ij)
+
+    if isinstance(order_nu, list):
+        assert (
+            len(order_nu) == 2
+        ), "specify order_nu as [nu_i, nu_j] for correlation orders for i and j respectively"
+        order_nu_i, order_nu_j = order_nu
+    else:
+        assert isinstance(order_nu, int), "specify order_nu as int or list of 2 ints"
+        order_nu_i = order_nu
 
     if not (frames[0].pbc.any()):
         for _ in ["cell_shift_a", "cell_shift_b", "cell_shift_c"]:
             rho0_ij = operations.remove_dimension(rho0_ij, axis="samples", name=_)
 
+    # must compute rhoi as sum of rho_0ij
     if rhonu_i is None:
         rhonu_i = single_center_features(
-            frames, order_nu=order_nu, hypers=hypers, lcut=lcut, cg=cg, kwargs=kwargs
+            frames, order_nu=order_nu_i, hypers=hypers, lcut=lcut, cg=cg, kwargs=kwargs
         )
+        # rhonu_i = _standardize(rhonu_i)
+    # if not both_centers:
+    rhonu_ij = cg_combine(
+        rhonu_i,
+        rho0_ij,
+        clebsch_gordan=cg,
+        other_keys_match=["species_center"],
+        lcut=lcut,
+        feature_names=kwargs.get("feature_names", None),
+    )
     if not both_centers:
-        rhonu_ij = cg_combine(
-            rhonu_i,
-            rho0_ij,
-            clebsch_gordan=cg,
-            other_keys_match=["species_center"],
-            lcut=lcut,
-            feature_names=kwargs.get("feature_names", None),
-        )
         return rhonu_ij
 
     else:
-        # build the feature with atom-centered density on both centers
-        # rho_ij = rho_i x gij x rho_j
-        rhonu_ip = relabel_key_contract(rhonu_i)
-        # gji = relabel_key_contract(gij)
-        rho0_ji = relabel_key_contract(rho0_ij)
+        if "order_nu_j" not in locals():
+            warnings.warn("nu_j not defined, using nu_i for nu_j as well")
+            order_nu_j = order_nu_i
+        if order_nu_j != order_nu_i:
+            rhonup_j = single_center_features(
+                frames,
+                order_nu=order_nu_j,
+                hypers=hypers,
+                lcut=lcut,
+                cg=cg,
+                kwargs=kwargs,
+            )
+        else:
+            rhonup_j = rhonu_i.copy()
 
-        rhonu_ijp = cg_increment(
-            rhonu_ip,
-            rho0_ji,
-            lcut=lcut,
-            other_keys_match=["species_contract"],
-            clebsch_gordan=cg,
-            mp=True,
-        )
+        rhoj = relabel_keys(rhonup_j, "species_neighbor")
 
-        rhonu_nuijp = cg_combine(
-            rhonu_i,
-            rhonu_ijp,
+        # build rhoj x gij
+        rhonu_nupij = cg_combine(
+            rhoj,
+            rhonu_ij,
+            # rhoj,
             lcut=lcut,
-            other_keys_match=["species_center"],
+            other_keys_match=["species_neighbor"],
             clebsch_gordan=cg,
+            mp=True,  # for combining with neighbor
+            feature_names=kwargs.get("feature_names", None),
         )
-        return rhonu_nuijp
+        # combine with rhoi
+        # rhonu_nupij = cg_combine(
+        #     rhonu_i,
+        #     rhonuij,
+        #     lcut=lcut,
+        #     other_keys_match=["species_center"],
+        #     clebsch_gordan=cg,
+        #     feature_names=kwargs.get("feature_names", None),
+        # )
+
+        return rhonu_nupij
+    
+    
+  
