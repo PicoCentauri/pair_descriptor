@@ -1,11 +1,12 @@
 # ACDC style 1,2 centered features from rascaline
 # depending on the target decide what kind of features must be computed
+import itertools
 
 from rascaline import SphericalExpansionByPair as PairExpansion
 import ase
 
 from rascaline import SphericalExpansion
-from metatensor import TensorMap
+from metatensor import TensorMap, Labels
 import metatensor.operations as operations
 import numpy as np
 import warnings
@@ -22,9 +23,17 @@ from .acdc_utils import (
 from typing import List, Union
 
 
-def single_center_features(frames, hypers, order_nu, lcut=None, cg=None, **kwargs):
+def single_center_features(
+    frames,
+    hypers,
+    order_nu,
+    selected_samples=None,
+    lcut=None,
+    cg=None,
+    **kwargs,
+):
     calculator = SphericalExpansion(**hypers)
-    rhoi = calculator.compute(frames)
+    rhoi = calculator.compute(frames, selected_samples=selected_samples)
     rhoi = rhoi.keys_to_properties(["species_neighbor"])
     # print(rhoi[0].samples)
     rho1i = acdc_standardize_keys(rhoi)
@@ -70,6 +79,8 @@ def pair_features(
     hypers: dict,
     hypers_pair: dict = None,
     cg=None,
+    center_indices: List[int] = None,
+    neighbor_indices: List[int] = None,
     rhonu_i: TensorMap = None,
     order_nu: Union[List[int], int] = None,
     all_pairs: bool = False,
@@ -92,7 +103,30 @@ def pair_features(
         hypers_pair = hypers
     calculator = PairExpansion(**hypers_pair)
 
-    rho0_ij = calculator.compute(frames) 
+    # Create samples for selection during computation
+    pair_selected_samples = None
+    selected_samples = None
+
+    if neighbor_indices is not None:
+        pair_selected_samples = Labels(
+            names="second_atom", values=np.array(neighbor_indices).reshape(-1,1))
+
+    if center_indices is not None:
+        selected_samples = Labels(
+            names="center", values=np.array(center_indices).reshape(-1,1))
+        if neighbor_indices is not None:
+            # in case one wants all combinations...
+            #values = list(itertools.product(center_indices, neighbor_indices))
+            values = np.array([center_indices, neighbor_indices]).T
+            pair_selected_samples = Labels(
+                names=["first_atom", "second_atom"], values=np.array(values))
+        else:
+            pair_selected_samples = Labels(
+                names=["first_atom"],
+                values=np.array(center_indices).reshape(-1,1))
+
+    
+    rho0_ij = calculator.compute(frames, selected_samples=pair_selected_samples)
 
     if all_pairs:
         hypers_allpairs = hypers.copy()
@@ -121,7 +155,10 @@ def pair_features(
             warnings.warn(f"Using unchanged hypers for all pairs feature")
         calculator_allpairs = PairExpansion(**hypers_allpairs)
 
-        rho0_ij = calculator_allpairs.compute(frames)
+        rho0_ij = calculator_allpairs.compute(
+            frames,
+            selected_samples=pair_selected_samples,
+        )
 
     rho0_ij = fix_gij(rho0_ij)
     rho0_ij = acdc_standardize_keys(rho0_ij)
@@ -142,7 +179,13 @@ def pair_features(
     # must compute rhoi as sum of rho_0ij
     if rhonu_i is None:
         rhonu_i = single_center_features(
-            frames, order_nu=order_nu_i, hypers=hypers, lcut=lcut, cg=cg, kwargs=kwargs
+            frames,
+            order_nu=order_nu_i,
+            hypers=hypers,
+            lcut=lcut,
+            cg=cg,
+            selected_samples=selected_samples,
+            kwargs=kwargs,
         )
         # rhonu_i = _standardize(rhonu_i)
     # if not both_centers:
@@ -168,6 +211,7 @@ def pair_features(
                 hypers=hypers,
                 lcut=lcut,
                 cg=cg,
+                selected_samples=selected_samples,
                 kwargs=kwargs,
             )
         else:
@@ -197,6 +241,3 @@ def pair_features(
         # )
 
         return rhonu_nupij
-    
-    
-  

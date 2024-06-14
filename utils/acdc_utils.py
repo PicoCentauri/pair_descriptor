@@ -54,7 +54,11 @@ def fix_gij(rho0_ij):
                 components=block.components,
                 properties=properties,
             )
-        block = sort_block(block)  # sort block samples
+        
+        # only sort if there are actual valuea
+        if len(block.values) != 0:
+            block = sort_block(block)  # sort block samples
+
         blocks.append(block)
     return TensorMap(rho0_ij.keys, blocks)
 
@@ -260,7 +264,8 @@ def cg_combine(
     X_grads = {}
 
     for index_a, block_a in x_a.items():
-        block_a = sort_block(block_a, axes="samples")
+        if len(block_a.values) != 0:
+            block_a = sort_block(block_a, axes="samples")
         lam_a = index_a["spherical_harmonics_l"]
         sigma_a = index_a["inversion_sigma"]
         order_a = index_a["order_nu"]
@@ -269,7 +274,8 @@ def cg_combine(
         )  # pre-extract this block as accessing a c property has a non-zero cost
         samples_a = block_a.samples
         for index_b, block_b in x_b.items():
-            block_b = sort_block(block_b, axes="samples")
+            if len(block_b.values) != 0:
+                block_b = sort_block(block_b, axes="samples")
             lam_b = index_b["spherical_harmonics_l"]
             sigma_b = index_b["inversion_sigma"]
             order_b = index_b["order_nu"]
